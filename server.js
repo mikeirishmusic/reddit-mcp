@@ -1,9 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
+import cors from "cors";
 import { z } from "zod";
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const USER_AGENT = "ClaudeRedditMCP/1.0";
@@ -29,13 +31,11 @@ r/${d.subreddit} · ${d.score} pts · ${d.num_comments} comments · u/${d.author
 ${d.url}${preview}`;
 }
 
-// Session store for SSE transports
 const transports = {};
 
 function buildServer() {
   const server = new McpServer({ name: "reddit-mcp", version: "1.0.0" });
 
-  // ── Tool 1: Search all of Reddit ────────────────────────────────────────────
   server.tool(
     "search_reddit",
     "Search all of Reddit for posts matching a query.",
@@ -69,7 +69,6 @@ function buildServer() {
     }
   );
 
-  // ── Tool 2: Fetch comments from a thread ────────────────────────────────────
   server.tool(
     "get_reddit_comments",
     "Fetch the top comments from a Reddit thread by URL.",
@@ -112,7 +111,6 @@ function buildServer() {
   return server;
 }
 
-// ── SSE endpoint (Claude.ai connects here) ───────────────────────────────────
 app.get("/sse", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
   transports[transport.sessionId] = transport;
@@ -120,14 +118,12 @@ app.get("/sse", async (req, res) => {
   await buildServer().connect(transport);
 });
 
-// ── Message endpoint ──────────────────────────────────────────────────────────
 app.post("/messages", async (req, res) => {
   const transport = transports[req.query.sessionId];
   if (!transport) return res.status(400).send("Session not found.");
   await transport.handlePostMessage(req, res);
 });
 
-// ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("Reddit MCP server is running."));
 
 const PORT = process.env.PORT || 3000;
