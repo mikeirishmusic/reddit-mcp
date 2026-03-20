@@ -1,14 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { z } from "zod";
 
 const app = express();
 
-// Manual CORS — no package needed
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
@@ -36,8 +35,6 @@ function formatPost(p) {
     : "";
   return `**${d.title}**\nr/${d.subreddit} · ${d.score} pts · ${d.num_comments} comments · u/${d.author}\n${d.url}${preview}`;
 }
-
-const transports = {};
 
 function buildServer() {
   const server = new McpServer({ name: "reddit-mcp", version: "1.0.0" });
@@ -86,38 +83,59 @@ function buildServer() {
   return server;
 }
 
-app.get("/sse", async (req, res) => {
+// Session store
+const sessions = {};
+
+app.post("/mcp", async (req, res) => {
   try {
-    const transport = new SSEServerTransport("/messages", res);
-    transports[transport.sessionId] = transport;
-    res.on("close", () => delete transports[transport.sessionId]);
-    await buildServer().connect(transport);
+    const sessionId = req.headers["mcp-session-id"];
+
+    let transport;
+    if (sessionId && sessions[sessionId]) {
+      transport = sessions[sessionId];
+    } else {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => Math.random().toString(36).slice(2),
+        onsessioninitialized: (id) => { sessions[id] = transport; },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) delete sessions[transport.sessionId];
+      };
+      await buildServer().connect(transport);
+    }
+
+    await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    console.error("SSE error:", err);
+    console.error("MCP error:", err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/messages", async (req, res) => {
+app.get("/mcp", async (req, res) => {
   try {
-    const transport = transports[req.query.sessionId];
+    const sessionId = req.headers["mcp-session-id"];
+    const transport = sessions[sessionId];
     if (!transport) return res.status(400).send("Session not found.");
-    await transport.handlePostMessage(req, res);
+    await transport.handleRequest(req, res);
   } catch (err) {
-    console.error("Message error:", err);
-    res.status(500).send("Internal error");
+    console.error("MCP GET error:", err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
+});
+
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (sessionId && sessions[sessionId]) {
+    await sessions[sessionId].close();
+    delete sessions[sessionId];
+  }
+  res.status(200).send("OK");
 });
 
 app.get("/", (req, res) => res.send("Reddit MCP server is running."));
 
-// Prevent unhandled rejections from crashing the process
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled rejection:", err);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception:", err);
-});
+process.on("unhandledRejection", (err) => console.error("Unhandled rejection:", err));
+process.on("uncaughtException", (err) => console.error("Uncaught exception:", err));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Reddit MCP listening on port ${PORT}`));
